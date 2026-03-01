@@ -2,60 +2,97 @@
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
+#include <string>
 #include <cstring>
 
 int main() {
-    // Try /dev/ttyS1 (Header Pins 8/10). If it fails, try /dev/ttyAML1
-    const char* port = "/dev/ttyS1";
-    int serial_port = open(port, O_RDWR | O_NOCTTY);
+    // UART A on Le Potato is typically /dev/ttyAML6
+    const char* port_name = "/dev/ttyAML6";
+    int serial_port = open(port_name, O_RDWR | O_NOCTTY | O_NDELAY);
 
     if (serial_port < 0) {
-        perror("Error opening serial port");
+        std::cerr << "Error: Unable to open serial port " << port_name << "\n";
         return 1;
     }
 
+    // Configure the serial port
     struct termios tty;
     if (tcgetattr(serial_port, &tty) != 0) {
-        perror("Error from tcgetattr");
+        std::cerr << "Error: Unable to get serial port attributes\n";
         close(serial_port);
         return 1;
     }
 
-    // Set Baud Rate
+    // Set baud rate to 115200 (RYLR998 default)
     cfsetispeed(&tty, B115200);
     cfsetospeed(&tty, B115200);
 
-    // Control Modes (c_cflag)
-    tty.c_cflag |= (CLOCAL | CREAD);    // Ignore modem lines, enable receiver
-    tty.c_cflag &= ~PARENB;             // No parity
-    tty.c_cflag &= ~CSTOPB;             // 1 stop bit
-    tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8;                 // 8 data bits
-    tty.c_cflag &= ~CRTSCTS;            // No hardware flow control
+    // 8N1 Mode (8 data bits, no parity, 1 stop bit)
+    tty.c_cflag &= ~PARENB; 
+    tty.c_cflag &= ~CSTOPB; 
+    tty.c_cflag &= ~CSIZE; 
+    tty.c_cflag |= CS8; 
+    
+    // Disable hardware flow control
+    tty.c_cflag &= ~CRTSCTS; 
+    // Enable receiver and ignore modem control lines
+    tty.c_cflag |= CREAD | CLOCAL; 
 
-    // Local Modes (c_lflag)
-    tty.c_lflag |= ICANON;              // Canonical mode (line-based)
-    tty.c_lflag &= ~ECHO;               // Disable echo
-    tty.c_lflag &= ~ISIG;               // Disable interpretation of INTR, QUIT, SUSP
+    // Disable canonical mode, echo, and signals (raw mode)
+    tty.c_lflag &= ~ICANON;
+    tty.c_lflag &= ~ECHO;
+    tty.c_lflag &= ~ECHOE;
+    tty.c_lflag &= ~ECHONL;
+    tty.c_lflag &= ~ISIG;
 
+    // Disable software flow control
+    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
+    // Disable special handling of bytes
+    tty.c_iflag &= ~(IGNBRK|BRKINT|PARMRK|ISTRIP|INLCR|IGNCR|ICRNL);
+
+    // Raw output
+    tty.c_oflag &= ~OPOST;
+
+    // Wait for up to 1 second (10 deciseconds), returning as soon as any data is received.
+    tty.c_cc[VTIME] = 10;    
+    tty.c_cc[VMIN] = 0;
+
+    // Save tty settings
     if (tcsetattr(serial_port, TCSANOW, &tty) != 0) {
-        perror("Error from tcsetattr");
+        std::cerr << "Error: Unable to set serial port attributes\n";
+        close(serial_port);
         return 1;
     }
 
-    std::cout << "Listening on " << port << " at 115200 baud..." << std::endl;
+    std::cout << "Listening on " << port_name << " for incoming data...\n";
 
-    char buffer[256];
+    char read_buf [256];
+    std::string received_message = "";
+
+    // Continuous read loop
     while (true) {
-        std::memset(buffer, 0, sizeof(buffer));
-        int n = read(serial_port, buffer, sizeof(buffer) - 1);
-        
-        if (n > 0) {
-            std::string msg(buffer);
-            // RYLR998 output: +RCV=ADDRESS,LENGTH,DATA,RSSI,SNR
-            // Looking for "1" in the DATA field
-            if (msg.find(",1,") != std::string::npos) {
-                std::cout << "Confirmed: Received 1" << std::endl;
+        memset(&read_buf, '\0', sizeof(read_buf));
+        int num_bytes = read(serial_port, &read_buf, sizeof(read_buf) - 1);
+
+        if (num_bytes > 0) {
+            for(int i = 0; i < num_bytes; i++) {
+                char c = read_buf[i];
+                received_message += c;
+                
+                // The RYLR998 ends messages with \r\n
+                if (c == '\n') {
+                    // Output the exact string received from the module
+                    std::cout << "Data received: " << received_message;
+                    
+                    // Optional: Check if the message contains the integer '1'
+                    // The format is usually +RCV=<Address>,<Length>,<Data>,<RSSI>,<SNR>
+                    if (received_message.find(",1,") != std::string::npos || 
+                        received_message.find(" 1\r") != std::string::npos) {
+                        std::cout << "Detected target integer: 1\n";
+                    }
+
+                    received_message = ""; 
+                }
             }
         }
     }
