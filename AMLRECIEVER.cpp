@@ -2,50 +2,60 @@
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
-#include <string.h>
+#include <cstring>
 
 int main() {
-    // Open the serial port
-    // /dev/ttyS1 is the standard UART on the Le Potato header
-    int serial_port = open("/dev/ttyS1", O_RDWR);
+    // Try /dev/ttyS1 (Header Pins 8/10). If it fails, try /dev/ttyAML1
+    const char* port = "/dev/ttyS1";
+    int serial_port = open(port, O_RDWR | O_NOCTTY);
 
     if (serial_port < 0) {
-        std::cerr << "Error: Could not open serial port." << std::endl;
+        perror("Error opening serial port");
         return 1;
     }
 
-    // Configure serial port settings
     struct termios tty;
-    if(tcgetattr(serial_port, &tty) != 0) {
-        std::cerr << "Error from tcgetattr." << std::endl;
+    if (tcgetattr(serial_port, &tty) != 0) {
+        perror("Error from tcgetattr");
+        close(serial_port);
         return 1;
     }
 
-    cfsetispeed(&tty, B115200); // Set Baud Rate to 115200
+    // Set Baud Rate
+    cfsetispeed(&tty, B115200);
     cfsetospeed(&tty, B115200);
 
-    tty.c_cflag &= ~PARENB;        // No parity
-    tty.c_cflag &= ~CSTOPB;        // 1 stop bit
+    // Control Modes (c_cflag)
+    tty.c_cflag |= (CLOCAL | CREAD);    // Ignore modem lines, enable receiver
+    tty.c_cflag &= ~PARENB;             // No parity
+    tty.c_cflag &= ~CSTOPB;             // 1 stop bit
     tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8;            // 8 data bits
-    tty.c_iflag |= ICANON;          // Canonical mode (reads line by line)
+    tty.c_cflag |= CS8;                 // 8 data bits
+    tty.c_cflag &= ~CRTSCTS;            // No hardware flow control
 
-    tcsetattr(serial_port, TCSANOW, &tty);
+    // Local Modes (c_lflag)
+    tty.c_lflag |= ICANON;              // Canonical mode (line-based)
+    tty.c_lflag &= ~ECHO;               // Disable echo
+    tty.c_lflag &= ~ISIG;               // Disable interpretation of INTR, QUIT, SUSP
 
-    std::cout << "Waiting for data from RYLR998..." << std::endl;
+    if (tcsetattr(serial_port, TCSANOW, &tty) != 0) {
+        perror("Error from tcsetattr");
+        return 1;
+    }
 
-    char read_buf[256];
-    
+    std::cout << "Listening on " << port << " at 115200 baud..." << std::endl;
+
+    char buffer[256];
     while (true) {
-        memset(&read_buf, '\0', sizeof(read_buf));
-        int num_bytes = read(serial_port, &read_buf, sizeof(read_buf));
-
-        if (num_bytes > 0) {
-            std::string data(read_buf);
-            // RYLR998 outputs received data in format: +RCV=ADDRESS,LENGTH,DATA,RSSI,SNR
-            // We check if the data section contains the integer "1"
-            if (data.find(",1,") != std::string::npos || data.find(",1\r") != std::string::npos) {
-                std::cout << "Received integer: 1" << std::endl;
+        std::memset(buffer, 0, sizeof(buffer));
+        int n = read(serial_port, buffer, sizeof(buffer) - 1);
+        
+        if (n > 0) {
+            std::string msg(buffer);
+            // RYLR998 output: +RCV=ADDRESS,LENGTH,DATA,RSSI,SNR
+            // Looking for "1" in the DATA field
+            if (msg.find(",1,") != std::string::npos) {
+                std::cout << "Confirmed: Received 1" << std::endl;
             }
         }
     }
